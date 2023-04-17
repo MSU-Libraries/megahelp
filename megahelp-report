@@ -1,0 +1,402 @@
+#!/bin/bash
+###########################################################
+# Script checks StorCLI for non-optimal virtual disks and
+# for physical disks that are either offline or bad and
+# print a report of overall health.
+#
+# Options available to only print the report if
+# problem detected, also to send report via email instead
+# of displaying to stdout.
+###########################################################
+
+SCRIPT_NAME=$( basename "$0" )
+
+command_help() {
+    echo ""
+    echo "Usage: $SCRIPT_NAME [FLAGS]"
+    echo ""
+    echo "Generate a report about MegaRAID status."
+    echo ""
+    echo "FLAGS:"
+    echo "  -g | --ghs"
+    echo "      Detect as problem if there is no Global Hot Spare available"
+    echo "  -e | --email"
+    echo "      If a problem is detected, send an email with report contents"
+    echo "  -a | --address EMAIL"
+    echo "      The address where emailed reports are sent; default: root@localhost"
+    echo "  -p | --only-on-problem"
+    echo "      Only display report if a problem is detected"
+    echo "  -c | --controller ID"
+    echo "      Specify the controller id of the card; default: 0"
+    echo "  -s | --search DIR"
+    echo "      Add a search path where to find the storcli or perccli binary"
+    echo "      Can be specified multiple times."
+    echo "  -b | --binary PATH"
+    echo "      Specify the full path to storcli or perccli binary"
+    echo "  -h | --help"
+    echo "      Display this message."
+    echo ""
+}
+
+if [[ "$1" == "-h" || "$1" == "--help" || "$1" == "help" ]]; then
+    command_help
+    exit 0
+fi
+
+# Default controller id
+CID=0
+# The full path to the storcli binary once located
+STORCLI=
+# Possible names of StorCLI binary
+STORCLI_BINARIES=( "storcli64" "storcli" "perccli64" "perccli" )
+# If StorCLI binary is not found in path, try these locations also
+SEARCH_PATHS=( "/opt/MegaRAID/storcli/" "/usr/local/sbin/" "/usr/local/bin/" "/opt/MegaRAID/perccli/" )
+
+EMAIL_TARGET=root@localhost
+EMAIL_ON_PROBLEM=0
+PRINT_ON_PROBLEM=0
+REQUIRE_GHS=0
+
+#######################################
+## Is this a mock run (don't actually run commands)
+##    MOCK=1 executable [FLAGS]
+mock_run() {
+    [[ "$MOCK" -eq 1 ]]
+    return $?
+}
+
+#######################################
+## Debug messages only displayed if DEBUG is set.
+##    DEBUG=1 executable [FLAGS]
+_debug() {
+    if [[ $DEBUG -eq 1 ]]; then
+        PREFIX=
+        if mock_run; then PREFIX="Mock - "; fi
+        1>&2 echo "${PREFIX}$*"
+    fi
+}
+
+while test $# -gt 0; do
+    case "$1" in
+    -c|--controller)
+        CID="$2"
+        if [[ ! "$CID" =~ ^[0-9]$ ]]; then
+            echo "ERROR: Controller number out of bounds (expected an integer 0 through 9)."
+            exit 1
+        fi
+        _debug "Set controller id: $CID"
+        shift
+        shift
+        ;;
+    -s|--search)
+        SEARCH=$( readlink -f "$2" 2> /dev/null )
+        if [[ ! -d "$SEARCH" ]]; then
+            echo "ERROR: Search path is not an accessible directory: $SEARCH"
+            exit 1
+        fi
+        SEARCH_PATHS+=("$SEARCH")
+        _debug "Added search path: $SEARCH"
+        shift
+        shift
+        ;;
+    -b|--binary)
+        BINARY=$( readlink -f "$2" 2> /dev/null )
+        if [[ ! -f "$BINARY" || ! -x "$BINARY" ]]; then
+            echo "ERROR: Binary is not an accessible executable file: $BINARY"
+            exit 1
+        fi
+        STORCLI_PATH="$BINARY"
+        _debug "Set storcli path: $STORCLI_PATH"
+        shift
+        ;;
+    -g|--ghs)
+        REQUIRE_GHS=1
+        shift
+        ;;
+    -p|--only-on-problem)
+        PRINT_ON_PROBLEM=1
+        shift
+        ;;
+    -e|--email)
+        EMAIL_ON_PROBLEM=1
+        shift
+        ;;
+    -a|--address)
+        EMAIL_TARGET="${2}"
+        shift
+        shift
+        ;;
+    *)
+      echo "Unknown argument: ${1}"
+      exit 1
+      ;;
+  esac
+done
+
+# Desired states enumerated
+# shellcheck disable=SC2034
+ALLOWED_VD_STATES=(optl)
+# shellcheck disable=SC2034
+ALLOWED_PD_STATES=(onln ugood ghs dhs)
+# Default subject message for alerts
+MAIL_SUBJECT="WARNING: Hardware RAID problem detected on $HOSTNAME"
+# Additional notes to add to alert email
+MAIL_NOTES=""
+
+# Flag to set if problem state is found (default to false)
+PROBLEM_STATE_FOUND=0
+
+locate_storcli() {
+    _debug "Locating storcli binary"
+    for BIN in "${STORCLI_BINARIES[@]}"; do
+        _debug "Looking for $BIN"
+        STORCLI=$( which "$BIN" )
+        FOUND_SCLI=$?
+        _debug "Searched PATH (${PATH})"
+        if [[ "$FOUND_SCLI" -ne 0 ]]; then
+            for SEARCH in "${SEARCH_PATHS[@]}"; do
+                SEARCH="${SEARCH%/}/"
+                _debug "Searching $SEARCH"
+                if [[ -f "${SEARCH}${BIN}" && -x "${SEARCH}${BIN}" ]]; then
+                    STORCLI="${SEARCH}${BIN}"
+                    break 2
+                fi
+            done
+        else
+            break
+        fi
+    done
+    _debug "Attempt to locate storcli binary resulted in: $STORCLI"
+    echo "$STORCLI"
+}
+
+if [[ -z "$STORCLI_PATH" ]]; then
+    STORCLI_PATH=$( locate_storcli )
+    if [[ -z "$STORCLI_PATH" ]]; then
+        echo "ERROR: Could not find StorCLI binary! Try using either -s or -b flags."
+        exit 1
+    fi
+fi
+
+###############################
+## Check if array contains a given value
+# Comparison is case insensitive.
+##  $1 -> Name of array to search
+##  $2 -> Value to find
+## Returns 0 if an element matches the value to find
+array_contains_ci() {
+    local ARRNAME="$1[@]"
+    local NEEDLE="$2"
+    for HAY in "${!ARRNAME}"; do
+        if [[ "${NEEDLE,,}" == "${HAY,,}" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+#############################################
+# Get progress of either all copyback or rebuild jobs
+#  $1 => (string) copyback or rebuild
+# Outputs the appropriate printable results
+# shellcheck disable=SC2034
+ALLOWED_PROGRESS_JOBS=(copyback rebuild)
+job_progress() {
+    JOB_TYPE="$1"
+    if ! array_contains_ci ALLOWED_PROGRESS_JOBS "${JOB_TYPE}"; then
+        echo "Invalid job progress request: ${JOB_TYPE}"
+        exit 1
+    fi
+    "${STORCLI_PATH}" "/c${CID}/eall/sall" show "${JOB_TYPE}" | grep '/c0\|Drive-ID' | grep -v 'Not in progress'
+}
+
+# Regular Expression shorthand
+RSR="[[:space:]]+"                              # Regex Space Required
+RSO="[[:space:]]*"                              # Regex Space Optional
+RGR="([[:graph:]]+)"                            # Regex Graph Required
+RGO="([[:graph:]]*)"                            # Regex Graph Optional
+ANY="(.+)"                                      # Regex Any Characters Required
+RZR="([[:graph:]]+[[:space:]][[:alpha:]]{2})"   # Regex Size Required (e.g. 45.6 TB)
+
+###########################################################
+# Virtual Disks
+
+# Show all virtual disks on controller
+VD_COMMAND="${STORCLI_PATH} /c${CID}/vall show"
+VD_OUTPUT=$( $VD_COMMAND )
+VD_EXIT=$?
+
+# Ensure command ran successfully with expected output
+if [[ $VD_EXIT -ne 0 && $VD_EXIT -ne 46 ]]; then
+    echo "ERROR: Command exited with code $VD_EXIT: $VD_COMMAND"
+    exit 1
+fi
+VD_HEADER_RE="^DG/VD${RSR}TYPE${RSR}State${RSR}Access${RSR}Consist${RSR}Cache${RSR}Cac${RSR}sCC${RSR}Size${RSR}Name${RSO}$"
+VD_ENTRY_RE="^$RGR$RSR$RGR$RSR$RGR$RSR$RGR$RSR$RGR$RSR$RGR$RSR$RGR$RSR$RGR$RSR$RZR$RSO$RGO$RSO$"
+VD_MATCHHEADER=1
+while read -r LINE; do
+    # Ensure we match the header before processing results
+    if [[ $LINE =~ $VD_HEADER_RE ]]; then
+        VD_MATCHHEADER=0
+        continue
+    fi
+    # Try to parse VD from output only if the header was found
+    if [[ $VD_MATCHHEADER -eq 0 && $LINE =~ $VD_ENTRY_RE ]]; then
+        if ! array_contains_ci ALLOWED_VD_STATES "${BASH_REMATCH[3]}"; then
+            MAIL_NOTES+="""
+Non-optimal virtual drive state (${BASH_REMATCH[3]}) detected for: ${BASH_REMATCH[1]}
+"""
+            PROBLEM_STATE_FOUND=1
+        fi
+    fi
+done <<< "$VD_OUTPUT"
+# Exit with error if no header was matched
+if [[ $VD_MATCHHEADER -ne 0 ]]; then
+    echo "ERROR: Command did not output a valid header: $VD_COMMAND"
+    exit 1
+fi
+
+###########################################################
+# Physical Disks
+
+# Show all physical disks on controller
+PD_COMMAND="${STORCLI_PATH} /c${CID}/eall/sall show"
+PD_OUTPUT=$( $PD_COMMAND )
+PD_EXIT=$?
+
+# Ensure command ran successfully with expected output
+if [[ $PD_EXIT -ne 0 && $PD_EXIT -ne 46 ]]; then
+    echo "ERROR: Command exited with code $PD_EXIT: $PD_COMMAND"
+    exit 1
+fi
+PD_HEADER_RE="^EID:Slt${RSR}DID${RSR}State${RSR}DG${RSR}Size${RSR}Intf${RSR}Med${RSR}SED${RSR}PI${RSR}SeSz${RSR}Model${RSR}Sp${RSR}Type${RSO}$"
+PD_ENTRY_RE="^$RGR$RSR$RGR$RSR$RGR$RSR$RGR$RSR$RZR$RSR$RGR$RSR$RGR$RSR$RGR$RSR$RGR$RSR$RGR$RSR$ANY$RSR$RGR$RSR$RGR$RSO$"
+PD_MATCHHEADER=1
+PD_FOUND_GHS=1
+PD_FOUND_REBUILD=1
+PD_FOUND_COPYBACK=1
+while read -r LINE; do
+    # Ensure we match the header before processing results
+    if [[ $LINE =~ $PD_HEADER_RE ]]; then
+        PD_MATCHHEADER=0
+        continue
+    fi
+
+    # Try to parse PD from output only if the header was found
+    if [[ $PD_MATCHHEADER -eq 0 && $LINE =~ $PD_ENTRY_RE ]]; then
+        # Record if specific PD states are found
+        if [[ "${BASH_REMATCH[3],,}" == "ghs" ]]; then
+            PD_FOUND_GHS=0
+        fi
+        if [[ "${BASH_REMATCH[3],,}" == "rbld" ]]; then
+            PD_FOUND_REBUILD=0
+        fi
+        if [[ "${BASH_REMATCH[3],,}" == "cpybck" ]]; then
+            PD_FOUND_COPYBACK=0
+        fi
+        # Validate PD states are only those allowed
+        if ! array_contains_ci ALLOWED_PD_STATES "${BASH_REMATCH[3]}"; then
+            PROBLEM_STATE_FOUND=1
+            MAIL_NOTES+="""
+Non-optimal physical drive state (${BASH_REMATCH[3]}) detected for: ${BASH_REMATCH[1]}
+"""
+        fi
+
+        # If a foreign drive is configured, send an alert (might just be a GHS that has been used and copied back)
+        if [[ ${BASH_REMATCH[4]} == "F" ]]; then
+            PROBLEM_STATE_FOUND=1
+            MAIL_SUBJECT="WARNING: Foreign drive group detected in RAID card on $HOSTNAME"
+            MAIL_NOTES+="""
+A foreign drive group is a drive that has previously been part of a
+RAID configuration. To reuse drives, any foreign configs must first
+be cleared.
+"""
+            break
+        fi
+    fi
+done <<< "$PD_OUTPUT"
+# Exit with error if no header was matched
+if [[ $PD_MATCHHEADER -ne 0 ]]; then
+    echo "ERROR: Command did not output a valid header: $PD_COMMAND"
+    exit 1
+fi
+
+# If the GHS flag was set, send alert when one doesn't exist
+if [[ $REQUIRE_GHS -eq 1 && $PD_FOUND_GHS -ne 0 ]]; then
+    MAIL_NOTES+="""
+No Global Hot Spare drive was found though the command flag requiring one be present was passed.
+"""
+    PROBLEM_STATE_FOUND=1
+fi
+
+# Include progress of rebuild jobs
+if [[ $PD_FOUND_REBUILD -eq 0 ]]; then
+    PROGRESS_OUT=$( job_progress rebuild )
+    MAIL_NOTES+="""
+RAID rebuild jobs:
+${PROGRESS_OUT}
+"""
+    PROBLEM_STATE_FOUND=1
+fi
+
+# Include progress of copyback jobs
+if [[ $PD_FOUND_COPYBACK -eq 0 ]]; then
+    PROGRESS_OUT=$( job_progress copyback )
+    MAIL_NOTES+="""
+RAID copyback jobs:
+${PROGRESS_OUT}
+"""
+    PROBLEM_STATE_FOUND=1
+fi
+
+if [[ $PROBLEM_STATE_FOUND -eq 1 ]]; then
+    MAIL_NOTES+="""
+A non-optimal RAID state was detected on: $HOSTNAME
+"""
+else
+    MAIL_NOTES+="""
+No issues were detected for RAID state on: $HOSTNAME
+"""
+fi
+
+MAIL_NOTES+="""
+Server IP address(es): $( hostname -I )
+
+Virtual Disk check command: $VD_COMMAND
+============================================================
+$( printf "%s\n"  "${VD_OUTPUT[@]}" )
+
+
+Physical Disk check command: $PD_COMMAND
+============================================================
+$( printf "%s\n"  "${PD_OUTPUT[@]}" )
+"""
+
+###########################################################
+# Send Notification (if problem state found)
+
+# Email function
+# Usage: email "from@example.com" "to@example.com" "Subject" "Message line 1\nMessage line 2"
+email() {
+    EMAIL_FROM="$1"
+    EMAIL_TO="$2"
+    EMAIL_SUBJECT="$3"
+    EMAIL_MESSAGE="$4"
+    EMAIL_HEADERS=$( printf 'From: %s\nTo: %s\nSubject: %s\n' "$EMAIL_FROM" "$EMAIL_TO" "$EMAIL_SUBJECT" )
+    printf '%s\n%b\n' "$EMAIL_HEADERS" "$EMAIL_MESSAGE" | $( which sendmail ) -t
+}
+
+if [[ "$EMAIL_ON_PROBLEM" -eq 1 ]]; then
+    if [[ "$PROBLEM_STATE_FOUND" -eq 1 ]]; then
+        HOSTNAMES=( "$( hostname -A )" "$HOSTNAME" localhost )
+        for MAILHOST in "${HOSTNAMES[@]}"; do
+            if [[ -n "$MAILHOST" ]]; then break; fi
+        done
+        TO="${EMAIL_TARGET}"
+        FROM="root@${MAILHOST}"
+        SUBJECT="${MAIL_SUBJECT}"
+        email "$FROM" "$TO" "$SUBJECT" "$MAIL_NOTES"
+    fi
+elif [[ "$PRINT_ON_PROBLEM" -eq 0 || "$PROBLEM_STATE_FOUND" -eq 1 ]]; then
+    echo "$MAIL_NOTES"
+fi

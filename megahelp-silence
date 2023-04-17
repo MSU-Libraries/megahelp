@@ -1,0 +1,135 @@
+#!/bin/bash
+########################################################
+# Silence a MegaRAID card which is sounding the alarm
+########################################################
+
+SCRIPT_NAME=$( basename "$0" )
+
+command_help() {
+    echo ""
+    echo "Usage: $SCRIPT_NAME [FLAGS]"
+    echo ""
+    echo "A script to silence a sounding alarm on a MegaRAID card."
+    echo ""
+    echo "FLAGS:"
+    echo "  -c | --controller ID"
+    echo "      Specify the controller id of the card; default: 0"
+    echo "  -s | --search DIR"
+    echo "      Add a search path where to find the storcli or perccli binary"
+    echo "      Can be specified multiple times."
+    echo "  -b | --binary PATH"
+    echo "      Specify the full path to storcli or perccli binary"
+    echo "  -h | --help"
+    echo "      Display this message."
+    echo ""
+}
+
+if [[ "$1" == "-h" || "$1" == "--help" || "$1" == "help" ]]; then
+    command_help
+    exit 0
+fi
+
+# Default controller id
+CID=0
+# The full path to the storcli binary once located
+STORCLI=
+# Possible names of StorCLI binary
+STORCLI_BINARIES=( "storcli64" "storcli" "perccli64" "perccli" )
+# If StorCLI binary is not found in PATH, try these locations also
+SEARCH_PATHS=( "/opt/MegaRAID/storcli/" "/usr/local/sbin/" "/usr/local/bin/" "/opt/MegaRAID/perccli/" )
+
+#######################################
+## Is this a mock run (don't actually run commands)
+##    MOCK=1 executable [FLAGS]
+mock_run() {
+    [[ "$MOCK" -eq 1 ]]
+    return $?
+}
+
+#######################################
+## Debug messages only displayed if DEBUG is set.
+##    DEBUG=1 executable [FLAGS]
+_debug() {
+    if [[ $DEBUG -eq 1 ]]; then
+        PREFIX=
+        if mock_run; then PREFIX="Mock - "; fi
+        1>&2 echo "${PREFIX}$*"
+    fi
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+    -c|--controller)
+        CID="$2"
+        if [[ ! "$CID" =~ ^[0-9]$ ]]; then
+            echo "ERROR: Controller number out of bounds (expected an integer 0 through 9)."
+            exit 1
+        fi
+        _debug "Set controller id: $CID"
+        shift
+        shift
+        ;;
+    -s|--search)
+        SEARCH=$( readlink -f "$2" 2> /dev/null )
+        if [[ ! -d "$SEARCH" ]]; then
+            echo "ERROR: Search path is not an accessible directory: $SEARCH"
+            exit 1
+        fi
+        SEARCH_PATHS+=("$SEARCH")
+        _debug "Added search path: $SEARCH"
+        shift
+        shift
+        ;;
+    -b|--binary)
+        BINARY=$( readlink -f "$2" 2> /dev/null )
+        if [[ ! -f "$BINARY" || ! -x "$BINARY" ]]; then
+            echo "ERROR: Binary is not an accessible executable file: $BINARY"
+            exit 1
+        fi
+        STORCLI_PATH="$BINARY"
+        _debug "Set storcli path: $STORCLI_PATH"
+        shift
+        ;;
+    *)
+        echo "Unknown argument: ${1}"
+        exit 1
+        ;;
+    esac
+done
+
+locate_storcli() {
+    _debug "Locating storcli binary"
+    for BIN in "${STORCLI_BINARIES[@]}"; do
+        _debug "Looking for $BIN"
+        STORCLI=$( which "$BIN" )
+        FOUND_SCLI=$?
+        _debug "Searched PATH (${PATH})"
+        if [[ "$FOUND_SCLI" -ne 0 ]]; then
+            for SEARCH in "${SEARCH_PATHS[@]}"; do
+                SEARCH="${SEARCH%/}/"
+                _debug "Searching $SEARCH"
+                if [[ -f "${SEARCH}${BIN}" && -x "${SEARCH}${BIN}" ]]; then
+                    STORCLI="${SEARCH}${BIN}"
+                    break 2
+                fi
+            done
+        else
+            break
+        fi
+    done
+    _debug "Attempt to locate storcli binary resulted in: $STORCLI"
+    echo "$STORCLI"
+}
+
+if [[ -z "$STORCLI_PATH" ]]; then
+    STORCLI_PATH=$( locate_storcli )
+    if [[ -z "$STORCLI_PATH" ]]; then
+        echo "ERROR: Could not find StorCLI binary! Try using either -s or -b flags."
+        exit 1
+    fi
+fi
+
+_debug "Running: $STORCLI_PATH /c$CID set alarm=silence"
+if ! mock_run; then
+    "$STORCLI_PATH" "/c$CID" set alarm=silence
+fi
