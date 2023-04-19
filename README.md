@@ -9,7 +9,7 @@ Helper scripts for managing RAIDs on MegaRAID controller cards.
 * A Mail tranfer agent (MTA) if you want email
 
 For more information on managing RAIDs using StorCLI, see
-https://github.com/MSU-Libraries/storcli-docs
+https://github.com/MSU-Libraries/storcli-doc
 
 ## Scripts
 
