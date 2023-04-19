@@ -19,7 +19,7 @@ command_help() {
     echo ""
     echo "FLAGS:"
     echo "  -g | --ghs"
-    echo "      Detect as problem if there is no Global Hot Spare available"
+    echo "      Report as a problem if there is no Global Hot Spare available"
     echo "  -e | --email"
     echo "      If a problem is detected, send an email with report contents"
     echo "  -a | --address EMAIL"

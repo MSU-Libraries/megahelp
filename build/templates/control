@@ -1,0 +1,13 @@
+Package: $PKG_NAME
+Version: $DEB_VERSION
+Architecture: all
+Maintainer: $PKGBLD_NAME <$PKGBLD_EMAIL>
+Installed-Size: $PKGBLD_INSTALL_SIZE
+Depends: bash
+Recommends: mail-transport-agent
+Section: utils
+Priority: optional
+Homepage: https://github.com/msu-libraries/megahelp/
+Description: Scripts to help manage MegaRAID controller
+ base storage. Requires StorCLI (or PERCCLI) binary to
+ be installed on host.

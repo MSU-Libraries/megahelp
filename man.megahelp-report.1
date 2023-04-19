@@ -1,0 +1,68 @@
+.TH "megahelp-report" "1" "17 Apr 2023" "" ""
+.SH "NAME"
+megahelp-report \- print a health report for a MegaRAID controller
+
+.SH "SYNOPSIS"
+.B megahelp-report
+[FLAGS]
+
+.SH "DESCRIPTION"
+.PP
+A helper script which generates a health report a MegaRAID controller,
+optionally emailing it if a problem is identified.
+
+.PP
+Requires the appropriate StorCLI (or PERCCLI for Dell cards)
+binary to be installed. This script will attempt to auto
+locate the appropriate binary to use, but it can also be
+manually specified via the flags.
+
+.SH "FLAGS"
+.TP
+.B -g / --ghs
+Report as a problem if there is no Global Hot Spare available.
+.TP
+.B -e / --email
+If a problem is detected, send an email with report contents.
+.TP
+.B -a / --address EMAIL
+The address where emailed reports are sent; default: root@localhost
+.TP
+.B -p / --only-on-problem
+Only display report if a problem is detected.
+.TP
+.B -c / --controller ID
+Specify the controller id of the card; default: 0
+.TP
+.B -s / --search DIR
+Add a search path where to find the storcli or perccli binary.
+Can be specified multiple times.
+.TP
+.B -b / --binary PATH
+Specify the full path to storcli or perccli binary.
+.TP
+.B -h / --help
+Display a help message about the command and flags.
+
+.SH "REQUIREMENTS"
+.TP
+Requires the StorCLI or PERCCLI binary be installed.
+
+.SH "REPORTING BUGS"
+.PP
+Please report any bugs at <npcollins/gmail/com>
+
+.SH "COPYRIGHT"
+.PP
+Copyright (c) 2017 Michigan State University Board of Trustees
+.PP
+
+.SH "LICENSE"
+.PP
+MIT License
+.PP
+
+.SH "AUTHOR"
+.PP
+Written by Nathan Collins <npcollins/gmail/com>
+

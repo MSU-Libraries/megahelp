@@ -1,0 +1,56 @@
+.TH "megahelp-silence" "1" "17 Apr 2023" "" ""
+.SH "NAME"
+megahelp-silence \- quiet an active MegaRAID alarm
+
+.SH "SYNOPSIS"
+.B megahelp-silence
+[FLAGS]
+
+.SH "DESCRIPTION"
+.PP
+A helper script which can be used to silence an ongoing
+alarm from a MegaRAID controller.
+
+.PP
+Requires the appropriate StorCLI (or PERCCLI for Dell cards)
+binary to be installed. This script will attempt to auto
+locate the appropriate binary to use, but it can also be
+manually specified via the flags.
+
+.SH "FLAGS"
+.TP
+.B -c / --controller ID
+Specify the controller id of the card; default: 0
+.TP
+.B -s / --search DIR
+Add a search path where to find the storcli or perccli binary.
+Can be specified multiple times.
+.TP
+.B -b / --binary PATH
+Specify the full path to storcli or perccli binary.
+.TP
+.B -h / --help
+Display a help message about the command and flags.
+
+.SH "REQUIREMENTS"
+.TP
+Requires the StorCLI or PERCCLI binary be installed.
+
+.SH "REPORTING BUGS"
+.PP
+Please report any bugs at <npcollins/gmail/com>
+
+.SH "COPYRIGHT"
+.PP
+Copyright (c) 2017 Michigan State University Board of Trustees
+.PP
+
+.SH "LICENSE"
+.PP
+MIT License
+.PP
+
+.SH "AUTHOR"
+.PP
+Written by Nathan Collins <npcollins/gmail/com>
+
